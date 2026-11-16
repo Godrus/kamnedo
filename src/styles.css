@@ -1,0 +1,57 @@
+@import "tailwindcss";
+
+@theme {
+  --color-bg: #12100e;
+  --color-surface: #1c1915;
+  --color-surface-2: #2a251f;
+  --color-fg: #f3eadc;
+  --color-muted: #a89884;
+  --color-line: #3d342c;
+  --color-ember: #e08a3c;
+  --color-ember-ink: #2a170c;
+  --color-moss: #8ea56a;
+  --color-moss-ink: #14210f;
+  --color-blood: #c4543c;
+  --color-blood-ink: #2c100e;
+  --font-display: "Fraunces", ui-serif, Georgia, serif;
+  --font-sans: "Outfit", ui-sans-serif, system-ui, sans-serif;
+  --radius-lg: 0.8rem;
+}
+
+@layer base {
+  button:not(:disabled),
+  [role="button"]:not(:disabled) {
+    cursor: pointer;
+  }
+  html,
+  body {
+    height: 100%;
+    background: var(--color-bg);
+    color: var(--color-fg);
+  }
+  body {
+    margin: 0;
+    font-family: var(--font-sans);
+    overflow: hidden;
+  }
+  input,
+  button {
+    font-family: inherit;
+  }
+}
+
+.game-host {
+  touch-action: none;
+}
+
+.stone-card {
+  background:
+    radial-gradient(120% 80% at 10% 0%, color-mix(in oklab, var(--color-ember) 16%, transparent), transparent 55%),
+    linear-gradient(180deg, var(--color-surface-2), var(--color-surface));
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pulse-ember {
+    animation: none !important;
+  }
+}
