@@ -1,15 +1,22 @@
 import * as THREE from "three";
 import {
   BED,
+  CHEST,
+  CHUNK,
+  CHUNKS_X,
   FARM,
   STILL,
   SX,
+  SY,
   SZ,
   TORCH,
   WALK,
+  inb,
+  MAT_LABEL,
   seasonOf,
   sunAmount,
   unidx,
+  type Mat,
   type Role,
   type Tool,
   type ViewMode,
@@ -17,10 +24,13 @@ import {
 import { createAudio, type AudioBus } from "./audio";
 import { clearSave, readSave, writeSave } from "./save";
 import {
+  brushCells,
   createGame,
   moodLabel,
   moodOf,
+  moveChest,
   paint,
+  paintBox,
   setRole,
   step,
   taskLabel,
@@ -28,7 +38,7 @@ import {
   type Enemy,
   type GameState,
 } from "./sim";
-import { buildMeshes, cellLight, computeLight, raycast, type LightMaps } from "./world";
+import { buildMeshes, cellLight, computeLight, ensureChunks, markChunks, raycast, type LightMaps } from "./world";
 
 export type DwarfHud = {
   id: number;
@@ -78,6 +88,16 @@ export type HudSnap = {
   mined: number;
   tutorial: boolean;
   maxLayer: number;
+  maxClip: number;
+  inspect: InspectHud | null;
+};
+
+export type InspectHud = {
+  title: string;
+  body: string;
+  chest: boolean;
+  cell: number;
+  slots: { mat: Mat; label: string; n: number; fort: number }[];
 };
 
 const VERT = `
@@ -120,8 +140,8 @@ function makeTerrainMat(alpha: number) {
     uniforms: {
       uSun: { value: 1 },
       uFog: { value: new THREE.Color("#9aafbf") },
-      uFogNear: { value: 24 },
-      uFogFar: { value: 68 },
+      uFogNear: { value: 40 },
+      uFogFar: { value: 150 },
       uAlpha: { value: alpha },
     },
     vertexShader: VERT,
@@ -240,22 +260,27 @@ const EMPTY: HudSnap = {
   lost: 0,
   mined: 0,
   tutorial: true,
-  maxLayer: 18,
+  maxLayer: SY - 4,
+  maxClip: SZ - 1,
+  inspect: null,
 };
 
 export class Engine {
   private host: HTMLElement;
   private renderer: THREE.WebGLRenderer;
   private scene = new THREE.Scene();
-  private camera = new THREE.PerspectiveCamera(48, 1, 0.1, 180);
+  private camera = new THREE.PerspectiveCamera(48, 1, 0.2, 380);
   private solidMat = makeTerrainMat(1);
   private waterMat = makeTerrainMat(0.78);
-  private solidMesh = new THREE.Mesh(new THREE.BufferGeometry(), this.solidMat);
-  private waterMesh = new THREE.Mesh(new THREE.BufferGeometry(), this.waterMat);
+  private terrain = new THREE.Group();
+  private chunkSolid = new Map<number, THREE.Mesh>();
+  private chunkWater = new Map<number, THREE.Mesh>();
+  private rebuildAll = true;
   private props = new THREE.Group();
   private markerDig: THREE.InstancedMesh;
   private markerBuild: THREE.InstancedMesh;
   private markerStock: THREE.InstancedMesh;
+  private markerArea: THREE.InstancedMesh;
   private hover: THREE.LineSegments;
   private ring: THREE.Mesh;
   private actors: Actor[] = [];
@@ -290,10 +315,15 @@ export class Engine {
   private held = new Set<string>();
   private qaOverride: Set<string> | null = null;
   private pointers = new Map<number, { x: number; y: number }>();
-  private painting = false;
-  private lastPaint = "";
-  private orbiting = false;
-  private lastPinch = 0;
+  private gesture: "none" | "pan" | "orbit" | "area" = "none";
+  private anchor: { x: number; y: number; z: number; nx: number; ny: number; nz: number } | null = null;
+  private dragMoved = 0;
+  private pinchDist = 0;
+  private pinchAng = 0;
+  private pinchX = 0;
+  private pinchY = 0;
+  private grab: { x: number; z: number; y: number } | null = null;
+  private focusCell: number | null = null;
   private userMoved = false;
   private audio: AudioBus;
   private saveT = 0;
@@ -325,32 +355,39 @@ export class Engine {
     this.renderer.domElement.className = "h-full w-full";
     host.appendChild(this.renderer.domElement);
 
-    this.scene.add(this.solidMesh, this.waterMesh, this.props, this.hemi, this.sun);
-    this.sun.position.set(30, 48, -10);
+    this.scene.add(this.terrain, this.props, this.hemi, this.sun);
+    this.sun.position.set(40, 60, -12);
 
     const box = new THREE.BoxGeometry(1, 1, 1);
     this.markerDig = new THREE.InstancedMesh(
       box,
       new THREE.MeshBasicMaterial({ color: 0xc4543c, transparent: true, opacity: 0.28, depthWrite: false }),
-      480,
+      1600,
     );
     this.markerBuild = new THREE.InstancedMesh(
       box,
       new THREE.MeshBasicMaterial({ color: 0xe08a3c, transparent: true, opacity: 0.32, depthWrite: false }),
-      240,
+      800,
     );
     this.markerStock = new THREE.InstancedMesh(
       new THREE.BoxGeometry(0.86, 0.05, 0.86),
       new THREE.MeshBasicMaterial({ color: 0x8ea56a, transparent: true, opacity: 0.55, depthWrite: false }),
-      200,
+      400,
+    );
+    this.markerArea = new THREE.InstancedMesh(
+      box,
+      new THREE.MeshBasicMaterial({ color: 0xf3eadc, transparent: true, opacity: 0.42, depthWrite: false }),
+      700,
     );
     this.markerDig.count = 0;
     this.markerBuild.count = 0;
     this.markerStock.count = 0;
+    this.markerArea.count = 0;
     this.markerDig.frustumCulled = false;
     this.markerBuild.frustumCulled = false;
     this.markerStock.frustumCulled = false;
-    this.scene.add(this.markerDig, this.markerBuild, this.markerStock);
+    this.markerArea.frustumCulled = false;
+    this.scene.add(this.markerDig, this.markerBuild, this.markerStock, this.markerArea);
 
     this.hover = new THREE.LineSegments(
       new THREE.EdgesGeometry(new THREE.BoxGeometry(1.02, 1.02, 1.02)),
@@ -402,12 +439,27 @@ export class Engine {
 
     const probe = {
       getYaw: () => this.yaw,
+      getPitch: () => this.pitch,
       getSpeed: () => this.lastPan,
       setKeys: (codes: string[]) => {
         this.qaOverride = new Set(codes);
       },
       getTarget: () => ({ x: this.target.x, y: this.target.y, z: this.target.z }),
       getRight: () => ({ x: this.right.x, y: 0, z: this.right.z }),
+      getForward: () => ({ x: this.fwd.x, y: 0, z: this.fwd.z }),
+      project: (x: number, y: number, z: number) => {
+        this.updateCamera();
+        const v = new THREE.Vector3(x, y, z).project(this.camera);
+        return { x: v.x, y: v.y };
+      },
+      orbitBy: (dx: number, dy: number) => this.orbitBy(dx, dy),
+      grabBy: (dx: number, dy: number) => {
+        const rect = this.renderer.domElement.getBoundingClientRect();
+        const cx = rect.left + rect.width / 2;
+        const cy = rect.top + rect.height / 2;
+        this.armGrab(cx, cy);
+        this.stickGrab(cx + dx, cy + dy);
+      },
     };
     window.__controlsTest = probe;
     window.__fort = {
@@ -489,7 +541,14 @@ export class Engine {
       this.target.y = WALK;
     }
     this.state.dirty = true;
+    this.rebuildAll = true;
     this.publish();
+  }
+
+  panStep(screenX: number, screenY: number) {
+    this.userMoved = true;
+    this.target.addScaledVector(this.right, screenX * 6);
+    this.target.addScaledVector(this.fwd, screenY * 6);
   }
 
   nudgeYaw(dir: number) {
@@ -498,20 +557,27 @@ export class Engine {
   }
 
   nudgeZoom(dir: number) {
-    this.dist = THREE.MathUtils.clamp(this.dist * (dir > 0 ? 0.86 : 1.16), 8, 72);
+    this.dist = THREE.MathUtils.clamp(this.dist * (dir > 0 ? 0.86 : 1.16), 8, 120);
   }
 
   setSlider(v: number) {
     if (this.view === "layer") {
-      this.layer = Math.max(1, Math.min(18, Math.round(v)));
+      this.layer = Math.max(1, Math.min(SY - 4, Math.round(v)));
       this.target.y = this.layer;
     } else this.clip = Math.max(0, Math.min(SZ - 1, Math.round(v)));
     this.state.dirty = true;
+    this.rebuildAll = true;
     this.publish();
+  }
+
+  nudgeLayer(dir: number) {
+    if (this.view !== "layer") this.setView("layer");
+    this.setSlider(this.layer + Math.sign(dir));
   }
 
   select(id: number | null) {
     this.selectedId = id;
+    if (id != null) this.focusCell = null;
     if (id != null) {
       const d = this.state.dwarves.find((o) => o.id === id && o.alive);
       if (d) this.target.set(d.x, d.y + 0.4, d.z);
@@ -551,6 +617,8 @@ export class Engine {
     this.speed = 1;
     this.view = "volume";
     this.clip = 0;
+    this.rebuildAll = true;
+    this.clearChunks();
     this.rebuild();
     this.syncProps();
     this.publish();
@@ -611,8 +679,49 @@ export class Engine {
       lost: s.lost,
       mined: s.mined,
       tutorial: !s.tutorialSeen,
-      maxLayer: 18,
+      maxLayer: SY - 4,
+      maxClip: SZ - 1,
+      inspect: this.inspectSnap(),
     };
+  }
+
+  private inspectSnap(): InspectHud | null {
+    if (this.focusCell == null) return null;
+    const { x, y, z } = unidx(this.focusCell);
+    const t = this.state.grid[this.focusCell];
+    const slots = (Object.keys(MAT_LABEL) as Mat[]).map((mat) => ({
+      mat,
+      label: MAT_LABEL[mat],
+      n: this.state.chests.get(this.focusCell!)?.[mat] ?? 0,
+      fort: this.state.stocks[mat],
+    }));
+    if (t === CHEST) {
+      return { title: "Сундук", body: "Склад крепости слева, сундук справа. Положите или заберите.", chest: true, cell: this.focusCell, slots };
+    }
+    if (t === STILL) return { title: "Пивоварня", body: "Пивовар варит, когда на складе есть еда.", chest: false, cell: this.focusCell, slots: [] };
+    if (t === BED) return { title: "Кровать", body: "Сюда ложатся, когда сморит сон.", chest: false, cell: this.focusCell, slots: [] };
+    if (t === FARM) {
+      const g = Math.round(this.state.growth.get(this.focusCell) ?? 0);
+      return { title: "Грядка", body: `Всходы на ${g}%. Зимой стоят.`, chest: false, cell: this.focusCell, slots: [] };
+    }
+    if (t === TORCH) return { title: "Факел", body: "Держит зал, когда солнце село.", chest: false, cell: this.focusCell, slots: [] };
+    if (this.state.stocksCells.has(this.focusCell)) return { title: "Склад", body: "Сюда носят камень, еду и дерево.", chest: false, cell: this.focusCell, slots: [] };
+    return { title: "Клетка", body: `${x}, ${y}, ${z}`, chest: false, cell: this.focusCell, slots: [] };
+  }
+
+  closeInspect = () => {
+    this.focusCell = null;
+    this.publish();
+  };
+
+  shiftChest(mat: Mat, dir: "in" | "out", n: number) {
+    if (this.focusCell == null) return;
+    const msg = moveChest(this.state, this.focusCell, mat, dir, n);
+    if (msg) {
+      this.state.banner = msg;
+      this.state.bannerT = 1.6;
+    }
+    this.publish();
   }
 
   private resize = () => {
@@ -653,7 +762,16 @@ export class Engine {
     this.lastPan = pan;
     if (keys.has("KeyQ")) this.yaw += dt * 0.9;
     if (keys.has("KeyE")) this.yaw -= dt * 0.9;
-    if (!this.userMoved && !this.reduced) this.yaw += dt * 0.05;
+
+    const born = ensureChunks(this.state.grid, this.state.ready, this.state.seed, this.target.x, this.target.z, 2);
+    if (born.length) {
+      for (const id of born) {
+        const cx = (id % CHUNKS_X) * CHUNK;
+        const cz = Math.floor(id / CHUNKS_X) * CHUNK;
+        markChunks(this.state.dirtyChunks, cx, cz);
+      }
+      this.state.dirty = true;
+    }
 
     if (this.speed > 0 && !this.state.fallen) {
       this.acc += dt * this.speed;
@@ -681,6 +799,7 @@ export class Engine {
     }
     this.syncActors(now / 1000);
     this.updateCamera();
+    this.cullChunks();
     const sun = sunAmount(this.state.hour);
     this.solidMat.uniforms.uSun.value = sun;
     this.waterMat.uniforms.uSun.value = sun;
@@ -725,7 +844,8 @@ export class Engine {
     this.fwd.y = 0;
     if (this.fwd.lengthSq() < 1e-6) this.fwd.set(0, 0, 1);
     this.fwd.normalize();
-    this.right.crossVectors(this.camera.up, this.fwd);
+    // fwd × up is screen-right. up × fwd pointed screen-left and made drag feel like Dota.
+    this.right.crossVectors(this.fwd, this.camera.up);
     this.right.y = 0;
     this.right.normalize();
     this.target.x = THREE.MathUtils.clamp(this.target.x, 2, SX - 2);
@@ -754,11 +874,78 @@ export class Engine {
   }
 
   private rebuild() {
-    const layer = this.view === "layer" ? this.layer : null;
     this.light = computeLight(this.state.grid);
-    const built = buildMeshes(this.state.grid, this.light, this.state.growth, layer);
-    applyMesh(this.solidMesh, built.solid);
-    applyMesh(this.waterMesh, built.water);
+    const keys: number[] = [];
+    if (this.rebuildAll || this.state.dirtyChunks.size === 0) {
+      for (let i = 0; i < this.state.ready.length; i++) if (this.state.ready[i]) keys.push(i);
+    } else {
+      for (const k of this.state.dirtyChunks) if (this.state.ready[k]) keys.push(k);
+    }
+    this.rebuildAll = false;
+    this.state.dirtyChunks.clear();
+    const layer = this.view === "layer" ? this.layer : null;
+    const clip = this.view === "volume" ? this.clip : 0;
+    for (const key of keys) {
+      const cx = key % CHUNKS_X;
+      const cz = Math.floor(key / CHUNKS_X);
+      const built = buildMeshes(
+        this.state.grid,
+        this.light,
+        this.state.growth,
+        layer,
+        { x0: cx * CHUNK, x1: cx * CHUNK + CHUNK - 1, z0: cz * CHUNK, z1: cz * CHUNK + CHUNK - 1 },
+        this.state.ready,
+        clip,
+      );
+      this.putChunk(key, built);
+    }
+  }
+
+  private putChunk(key: number, built: ReturnType<typeof buildMeshes>) {
+    let solid = this.chunkSolid.get(key);
+    if (!solid) {
+      solid = new THREE.Mesh(new THREE.BufferGeometry(), this.solidMat);
+      this.chunkSolid.set(key, solid);
+      this.terrain.add(solid);
+    }
+    applyMesh(solid, built.solid);
+    let water = this.chunkWater.get(key);
+    if (!water) {
+      water = new THREE.Mesh(new THREE.BufferGeometry(), this.waterMat);
+      this.chunkWater.set(key, water);
+      this.terrain.add(water);
+    }
+    applyMesh(water, built.water);
+  }
+
+  private clearChunks() {
+    for (const mesh of this.chunkSolid.values()) {
+      mesh.geometry.dispose();
+      this.terrain.remove(mesh);
+    }
+    for (const mesh of this.chunkWater.values()) {
+      mesh.geometry.dispose();
+      this.terrain.remove(mesh);
+    }
+    this.chunkSolid.clear();
+    this.chunkWater.clear();
+  }
+
+  private cullChunks() {
+    const ccx = Math.floor(this.target.x / CHUNK);
+    const ccz = Math.floor(this.target.z / CHUNK);
+    for (const [key, mesh] of this.chunkSolid) {
+      const cx = key % CHUNKS_X;
+      const cz = Math.floor(key / CHUNKS_X);
+      const near = Math.max(Math.abs(cx - ccx), Math.abs(cz - ccz)) <= 4;
+      const has = (mesh.geometry.getAttribute("position")?.count ?? 0) > 0;
+      mesh.visible = near && has;
+      const water = this.chunkWater.get(key);
+      if (water) {
+        const wh = (water.geometry.getAttribute("position")?.count ?? 0) > 0;
+        water.visible = near && wh;
+      }
+    }
   }
 
   private syncMarkers() {
@@ -799,14 +986,18 @@ export class Engine {
     const flameGeo = new THREE.SphereGeometry(0.09, 6, 5);
     for (let i = 0; i < grid.length; i++) {
       const t = grid[i];
-      if (t !== BED && t !== STILL && t !== TORCH && t !== FARM) continue;
-      const x = i % SX;
-      const y = Math.floor(i / SX) % 22;
-      const z = Math.floor(i / (SX * 22));
+      if (t !== BED && t !== STILL && t !== TORCH && t !== FARM && t !== CHEST) continue;
+      const { x, y, z } = unidx(i);
       if (t === BED) {
         const m = new THREE.Mesh(bedGeo, bedMat);
         m.position.set(x + 0.5, y + 0.1, z + 0.5);
         this.props.add(m);
+      } else if (t === CHEST) {
+        const body = new THREE.Mesh(new THREE.BoxGeometry(0.62, 0.4, 0.46), woodMat);
+        body.position.set(x + 0.5, y + 0.22, z + 0.5);
+        const lid = new THREE.Mesh(new THREE.BoxGeometry(0.66, 0.1, 0.5), metal);
+        lid.position.set(x + 0.5, y + 0.46, z + 0.5);
+        this.props.add(body, lid);
       } else if (t === STILL) {
         const m = new THREE.Mesh(stillGeo, woodMat);
         m.position.set(x + 0.5, y + 0.2, z + 0.5);
@@ -838,9 +1029,7 @@ export class Engine {
     kinds.forEach((entry, n) => {
       const cell = stock[n];
       if (cell === undefined || entry[1] <= 0) return;
-      const x = cell % SX;
-      const y = Math.floor(cell / SX) % 22;
-      const z = Math.floor(cell / (SX * 22));
+      const { x, y, z } = unidx(cell);
       const m = new THREE.Mesh(crate, new THREE.MeshLambertMaterial({ color: colors[entry[0]] }));
       const sc = 0.45 + Math.min(1.1, entry[1] / 40);
       m.scale.setScalar(sc);
@@ -896,17 +1085,9 @@ export class Engine {
     return ray.ray;
   }
 
-  private paintAt(cx: number, cy: number) {
+  private pickBlock(cx: number, cy: number) {
     const ray = this.rayFrom(cx, cy);
-    if (this.tool === "look") {
-      const d = this.pickDwarf(ray);
-      if (d) {
-        this.selectedId = d.id;
-        this.publish();
-        return;
-      }
-    }
-    const hit = raycast(
+    return raycast(
       this.state.grid,
       ray.origin.x,
       ray.origin.y,
@@ -914,26 +1095,130 @@ export class Engine {
       ray.direction.x,
       ray.direction.y,
       ray.direction.z,
-      80,
+      140,
       this.view === "layer" ? this.layer : null,
       this.view === "volume" ? this.clip : 0,
     );
-    if (!hit) {
-      this.hover.visible = false;
-      return;
+  }
+
+  private showBrush(cells: { x: number; y: number; z: number }[]) {
+    const mesh = this.markerArea;
+    const max = (mesh.instanceMatrix.array as Float32Array).length / 16;
+    const use = Math.min(cells.length, max);
+    for (let i = 0; i < use; i++) {
+      const c = cells[i];
+      this.dummy.position.set(c.x + 0.5, c.y + 0.5, c.z + 0.5);
+      this.dummy.scale.set(1.04, 1.04, 1.04);
+      this.dummy.rotation.set(0, 0, 0);
+      this.dummy.updateMatrix();
+      mesh.setMatrixAt(i, this.dummy.matrix);
     }
-    this.hover.visible = true;
-    this.hover.position.set(hit.x + 0.5, hit.y + 0.5, hit.z + 0.5);
-    if (!(this.painting || this.tool !== "look")) return;
-    const key = `${this.tool}:${hit.x}:${hit.y}:${hit.z}`;
-    if (this.painting && key === this.lastPaint) return;
-    this.lastPaint = key;
+    mesh.count = use;
+    mesh.instanceMatrix.needsUpdate = true;
+  }
+
+  private panBy(dx: number, dy: number) {
+    const h = Math.max(1, this.host.clientHeight);
+    const scale = (this.dist / h) * 1.15;
+    // Grab, not Dota: the ground follows the finger.
+    this.target.addScaledVector(this.right, -dx * scale);
+    this.target.addScaledVector(this.fwd, dy * scale);
+  }
+
+  private planePoint(cx: number, cy: number, y: number) {
+    this.updateCamera();
+    const ray = this.rayFrom(cx, cy);
+    if (Math.abs(ray.direction.y) < 1e-4) return null;
+    const t = (y - ray.origin.y) / ray.direction.y;
+    if (t < 0) return null;
+    return { x: ray.origin.x + ray.direction.x * t, z: ray.origin.z + ray.direction.z * t };
+  }
+
+  private armGrab(cx: number, cy: number) {
+    const hit = this.planePoint(cx, cy, this.target.y);
+    this.grab = hit ? { x: hit.x, z: hit.z, y: this.target.y } : null;
+  }
+
+  /** Keep the grabbed ground point under the finger. */
+  private stickGrab(cx: number, cy: number) {
+    if (!this.grab) {
+      return false;
+    }
+    for (let i = 0; i < 2; i++) {
+      const hit = this.planePoint(cx, cy, this.grab.y);
+      if (!hit) return false;
+      this.target.x += this.grab.x - hit.x;
+      this.target.z += this.grab.z - hit.z;
+    }
+    return true;
+  }
+
+  /** Drag follows the mountain: right and up both pull the view with the finger. */
+  private orbitBy(dx: number, dy: number) {
+    this.userMoved = true;
+    this.yaw -= dx * 0.012;
+    this.pitch = THREE.MathUtils.clamp(this.pitch - dy * 0.008, 0.18, 1.35);
+  }
+
+  private beginPinch() {
+    const pts = [...this.pointers.values()];
+    if (pts.length < 2) return;
+    this.pinchDist = Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y);
+    this.pinchAng = Math.atan2(pts[1].y - pts[0].y, pts[1].x - pts[0].x);
+    this.pinchX = (pts[0].x + pts[1].x) / 2;
+    this.pinchY = (pts[0].y + pts[1].y) / 2;
+    this.armGrab(this.pinchX, this.pinchY);
+    this.gesture = "none";
+    this.anchor = null;
+    this.markerArea.count = 0;
+  }
+
+  private paintAt(cx: number, cy: number) {
+    const hit = this.pickBlock(cx, cy);
+    if (!hit) return;
     const msg = paint(this.state, this.tool, hit.x, hit.y, hit.z, hit.nx, hit.ny, hit.nz);
     if (msg) {
       this.state.banner = msg;
       this.state.bannerT = 1.8;
     }
     this.syncMarkers();
+    this.publish();
+  }
+
+  private inspectAt(cx: number, cy: number) {
+    const ray = this.rayFrom(cx, cy);
+    const dwarf = this.pickDwarf(ray);
+    if (dwarf) {
+      this.selectedId = dwarf.id;
+      this.focusCell = null;
+      this.publish();
+      return;
+    }
+    const hit = this.pickBlock(cx, cy);
+    if (!hit) {
+      this.focusCell = null;
+      this.hover.visible = false;
+      this.publish();
+      return;
+    }
+    const spots = [
+      [hit.x, hit.y, hit.z],
+      [hit.x + hit.nx, hit.y + hit.ny, hit.z + hit.nz],
+      [hit.x, hit.y + 1, hit.z],
+    ];
+    this.focusCell = null;
+    for (const [x, y, z] of spots) {
+      if (!inb(x, y, z)) continue;
+      const i = x + SX * (y + SY * z);
+      const t = this.state.grid[i];
+      if (t === CHEST || t === BED || t === STILL || t === TORCH || t === FARM || this.state.stocksCells.has(i)) {
+        this.focusCell = i;
+        this.selectedId = null;
+        break;
+      }
+    }
+    this.hover.visible = true;
+    this.hover.position.set(hit.x + 0.5, hit.y + 0.5, hit.z + 0.5);
     this.publish();
   }
 
@@ -964,75 +1249,111 @@ export class Engine {
     this.userMoved = true;
     this.renderer.domElement.setPointerCapture(e.pointerId);
     this.pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
-    if (e.button === 2 || e.button === 1 || e.altKey || this.tool === "look" || this.pointers.size > 1) {
-      this.orbiting = true;
-      this.painting = false;
-    } else {
-      this.painting = true;
-      this.paintAt(e.clientX, e.clientY);
+    this.dragMoved = 0;
+    if (this.pointers.size >= 2) {
+      this.beginPinch();
+      return;
+    }
+    if (e.button === 1 || e.button === 2 || e.altKey) {
+      this.gesture = "pan";
+      this.armGrab(e.clientX, e.clientY);
+      return;
+    }
+    if (this.tool === "look") {
+      // Touch follows map conventions: one finger grabs the world and moves
+      // it with the finger. Desktop keeps the more precise orbit gesture.
+      this.gesture = this.coarse ? "pan" : "orbit";
+      if (this.coarse) this.armGrab(e.clientX, e.clientY);
+      return;
+    }
+    this.gesture = "area";
+    const hit = this.pickBlock(e.clientX, e.clientY);
+    this.anchor = hit;
+    if (hit) {
+      this.hover.visible = true;
+      this.hover.position.set(hit.x + 0.5, hit.y + 0.5, hit.z + 0.5);
+      this.showBrush(brushCells(hit, hit, hit.nx, hit.ny, hit.nz));
     }
   };
 
   private onMove = (e: PointerEvent) => {
     const prev = this.pointers.get(e.pointerId);
     if (!prev) {
-      if (!this.coarse) this.preview(e.clientX, e.clientY);
+      if (!this.coarse && this.gesture === "none") this.preview(e.clientX, e.clientY);
       return;
     }
     const dx = e.clientX - prev.x;
     const dy = e.clientY - prev.y;
     prev.x = e.clientX;
     prev.y = e.clientY;
+    this.dragMoved += Math.hypot(dx, dy);
     if (this.pointers.size >= 2) {
       const pts = [...this.pointers.values()];
       const dist = Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y);
-      if (this.lastPinch > 0) {
-        const ratio = this.lastPinch / dist;
-        this.dist = THREE.MathUtils.clamp(this.dist * ratio, 8, 72);
+      const cx = (pts[0].x + pts[1].x) / 2;
+      const cy = (pts[0].y + pts[1].y) / 2;
+      if (this.pinchDist > 8) {
+        this.dist = THREE.MathUtils.clamp(this.dist * (this.pinchDist / Math.max(8, dist)), 8, 120);
       }
-      this.lastPinch = dist;
-      this.painting = false;
-      this.yaw -= dx * 0.005;
+      if (!this.stickGrab(cx, cy)) this.panBy(cx - this.pinchX, cy - this.pinchY);
+      const angle = Math.atan2(pts[1].y - pts[0].y, pts[1].x - pts[0].x);
+      let twist = angle - this.pinchAng;
+      if (twist > Math.PI) twist -= Math.PI * 2;
+      if (twist < -Math.PI) twist += Math.PI * 2;
+      if (Math.abs(twist) > 0.002) this.yaw -= twist * 0.9;
+      this.pinchDist = dist;
+      this.pinchAng = angle;
+      this.pinchX = cx;
+      this.pinchY = cy;
       return;
     }
-    this.lastPinch = 0;
-    if (this.painting) this.paintAt(e.clientX, e.clientY);
-    else if (this.orbiting) {
-      this.yaw -= dx * 0.007;
-      this.pitch = THREE.MathUtils.clamp(this.pitch + dy * 0.005, 0.22, 1.48);
+    if (this.gesture === "pan") {
+      if (!this.stickGrab(e.clientX, e.clientY)) this.panBy(dx, dy);
+    } else if (this.gesture === "orbit") this.orbitBy(dx, dy); else if (this.gesture === "area" && this.anchor) {
+      const hit = this.pickBlock(e.clientX, e.clientY) ?? this.anchor;
+      this.hover.visible = true;
+      this.hover.position.set(hit.x + 0.5, hit.y + 0.5, hit.z + 0.5);
+      this.showBrush(brushCells(this.anchor, hit, this.anchor.nx, this.anchor.ny, this.anchor.nz));
     }
   };
 
   private onUp = (e: PointerEvent) => {
+    const was = this.gesture;
+    const moved = this.dragMoved;
+    const anchor = this.anchor;
     this.pointers.delete(e.pointerId);
-    if (this.pointers.size < 2) this.lastPinch = 0;
-    if (this.pointers.size === 0) {
-      this.painting = false;
-      this.orbiting = false;
-      this.lastPaint = "";
+    if (this.pointers.size >= 2) this.beginPinch();
+    if (this.pointers.size > 0) return;
+    this.gesture = "none";
+    this.anchor = null;
+    this.grab = null;
+    this.markerArea.count = 0;
+    this.markerArea.instanceMatrix.needsUpdate = true;
+    if (was === "area" && anchor) {
+      const hit = this.pickBlock(e.clientX, e.clientY) ?? anchor;
+      const msg = paintBox(this.state, this.tool, anchor, hit, anchor.nx, anchor.ny, anchor.nz);
+      if (msg) {
+        this.state.banner = msg;
+        this.state.bannerT = 1.8;
+      }
+      this.syncMarkers();
+      this.publish();
+    } else if ((was === "orbit" || was === "pan") && moved < 10) {
+      this.inspectAt(e.clientX, e.clientY);
     }
   };
 
   private onWheel = (e: WheelEvent) => {
     e.preventDefault();
     this.userMoved = true;
-    this.dist = THREE.MathUtils.clamp(this.dist * (e.deltaY > 0 ? 1.08 : 0.92), 8, 72);
+    this.armGrab(e.clientX, e.clientY);
+    this.dist = THREE.MathUtils.clamp(this.dist * (e.deltaY > 0 ? 1.08 : 0.92), 8, 120);
+    this.stickGrab(e.clientX, e.clientY);
+    this.grab = null;
   };
 
   private preview(cx: number, cy: number) {
-    const ray = this.rayFrom(cx, cy);
-    const hit = raycast(
-      this.state.grid,
-      ray.origin.x,
-      ray.origin.y,
-      ray.origin.z,
-      ray.direction.x,
-      ray.direction.y,
-      ray.direction.z,
-      80,
-      this.view === "layer" ? this.layer : null,
-      this.view === "volume" ? this.clip : 0,
-    );
+    const hit = this.pickBlock(cx, cy);
     if (!hit) {
       this.hover.visible = false;
       return;
@@ -1057,6 +1378,7 @@ export class Engine {
       Digit5: "farm",
       Digit6: "still",
       Digit7: "stock",
+      Digit0: "chest",
       Digit8: "torch",
       Digit9: "cancel",
     };
@@ -1084,10 +1406,15 @@ declare global {
   interface Window {
     __controlsTest?: {
       getYaw: () => number;
+      getPitch: () => number;
       getSpeed: () => number;
       setKeys: (codes: string[]) => void;
       getTarget: () => { x: number; y: number; z: number };
       getRight: () => { x: number; y: number; z: number };
+      getForward: () => { x: number; y: number; z: number };
+      project: (x: number, y: number, z: number) => { x: number; y: number };
+      orbitBy: (dx: number, dy: number) => void;
+      grabBy: (dx: number, dy: number) => void;
     };
     __fort?: {
       snap: () => HudSnap;

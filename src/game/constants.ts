@@ -1,6 +1,9 @@
-export const SX = 40;
+export const SX = 128;
 export const SY = 22;
-export const SZ = 40;
+export const SZ = 128;
+export const CHUNK = 16;
+export const CHUNKS_X = SX / CHUNK;
+export const CHUNKS_Z = SZ / CHUNK;
 
 export const AIR = 0;
 export const GRASS = 1;
@@ -17,10 +20,11 @@ export const FARM = 11;
 export const BED = 12;
 export const STILL = 13;
 export const TORCH = 14;
+export const CHEST = 15;
 
 /** Air cell dwarves walk in inside the hall. */
 export const WALK = 12;
-export const ROOM = { x0: 15, x1: 25, z0: 22, z1: 31 };
+export const ROOM = { x0: 56, x1: 68, z0: 60, z1: 70 };
 
 export type Mat = "stone" | "ore" | "gem" | "wood" | "food" | "drink";
 export type Role = "miner" | "mason" | "farmer" | "brewer" | "hauler" | "guard";
@@ -32,6 +36,7 @@ export type Tool =
   | "farm"
   | "still"
   | "stock"
+  | "chest"
   | "torch"
   | "cancel";
 export type ViewMode = "volume" | "layer";
@@ -45,6 +50,15 @@ export const ROLE_LABEL: Record<Role, string> = {
   guard: "Страж",
 };
 
+export const MAT_LABEL: Record<Mat, string> = {
+  stone: "камень",
+  ore: "руда",
+  gem: "самоцветы",
+  wood: "дерево",
+  food: "еда",
+  drink: "питьё",
+};
+
 export const TOOLS: { id: Tool; label: string; key: string }[] = [
   { id: "look", label: "Обзор", key: "1" },
   { id: "dig", label: "Копать", key: "2" },
@@ -53,13 +67,23 @@ export const TOOLS: { id: Tool; label: string; key: string }[] = [
   { id: "farm", label: "Ферма", key: "5" },
   { id: "still", label: "Брага", key: "6" },
   { id: "stock", label: "Склад", key: "7" },
+  { id: "chest", label: "Сундук", key: "0" },
   { id: "torch", label: "Факел", key: "8" },
   { id: "cancel", label: "Снять", key: "9" },
 ];
 
 export const SEASONS = ["весна", "лето", "осень", "зима"] as const;
 
-export const SAVE_KEY = "kamnedol-save-v1";
+export const SAVE_KEY = "kamnedol-save-v2";
+
+// At x1 the calendar advances six in-game minutes per real second.
+// Movement, hauling and combat remain real-time; only the calendar is slowed
+// so a full day is readable instead of disappearing in a few seconds.
+export const GAME_HOURS_PER_REAL_SECOND = 0.1;
+
+export function chunkIndex(cx: number, cz: number) {
+  return cx + CHUNKS_X * cz;
+}
 
 export function idx(x: number, y: number, z: number) {
   return x + SX * (y + SY * z);
@@ -89,7 +113,7 @@ export function passable(t: number) {
 }
 
 export function blocksLight(t: number) {
-  return t === GRASS || t === DIRT || t === STONE || t === ORE || t === GEM || t === WALL || t === FARM || t === MAGMA || t === WATER;
+  return t === GRASS || t === DIRT || t === STONE || t === ORE || t === GEM || t === WALL || t === FARM || t === MAGMA || t === WATER || t === CHEST;
 }
 
 export function diggable(t: number) {
@@ -135,4 +159,8 @@ export function sunAmount(hour: number) {
   if (hour < 5 || hour > 21) return 0.06;
   const x = (hour - 5) / 16;
   return 0.06 + 0.94 * Math.sin(Math.min(1, Math.max(0, x)) * Math.PI);
+}
+
+export function emptyMats(): Record<Mat, number> {
+  return { stone: 0, ore: 0, gem: 0, wood: 0, food: 0, drink: 0 };
 }

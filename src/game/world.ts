@@ -2,6 +2,10 @@ import {
   AIR,
   BED,
   BLOCK_COLOR,
+  CHEST,
+  CHUNK,
+  CHUNKS_X,
+  CHUNKS_Z,
   DIRT,
   FARM,
   GEM,
@@ -21,6 +25,7 @@ import {
   WALL,
   WATER,
   blocksLight,
+  chunkIndex,
   diggable,
   goodStand,
   idx,
@@ -126,6 +131,98 @@ function set(grid: Uint8Array, x: number, y: number, z: number, t: number) {
   if (inb(x, y, z)) grid[idx(x, y, z)] = t;
 }
 
+function columnHeight(x: number, z: number, seed: number) {
+  const n = noise2(x * 0.07, z * 0.07, seed) * 2 + noise2(x * 0.025, z * 0.025, seed + 3);
+  const cx = (ROOM.x0 + ROOM.x1) / 2;
+  const cz = (ROOM.z0 + ROOM.z1) / 2 + 6;
+  const dx = (x - cx) / 36;
+  const dz = (z - cz) / 42;
+  const ridge = Math.max(0, 1 - (dx * dx + dz * dz));
+  let h = 4 + Math.floor(ridge * 11 + (n - 1) * 2.2);
+  if (x >= ROOM.x0 - 1 && x <= ROOM.x1 + 1 && z >= ROOM.z0 - 1 && z <= ROOM.z1 + 2) {
+    h = Math.max(h, WALK + 6);
+  }
+  return Math.max(3, Math.min(SY - 3, h));
+}
+
+function fillColumn(grid: Uint8Array, x: number, z: number, seed: number) {
+  const h = columnHeight(x, z, seed);
+  for (let y = 0; y <= h; y++) {
+    let t = STONE;
+    if (y === h && h >= 6) t = GRASS;
+    else if (y >= h - 2 && h >= 6) t = DIRT;
+    if (t === STONE && y > 1 && y < h - 3 && hash(x, y + z * 17, seed + 11) > 0.82) t = ORE;
+    if (t === STONE && y > 1 && y < 6 && hash(x + 40, y + z * 9, seed + 19) > 0.94) t = GEM;
+    grid[idx(x, y, z)] = t;
+  }
+  for (let y = h + 1; y < SY; y++) grid[idx(x, y, z)] = AIR;
+  if (hash(x, z, seed + 7) > 0.9 && h >= 7 && h < SY - 4) {
+    const overFort = x >= ROOM.x0 - 1 && x <= ROOM.x1 + 1 && z >= ROOM.z0 - 8 && z <= ROOM.z1 + 1;
+    if (!overFort) {
+      set(grid, x, h + 1, z, LOG);
+      set(grid, x, h + 2, z, LOG);
+      for (let dz = -1; dz <= 1; dz++) {
+        for (let dx = -1; dx <= 1; dx++) set(grid, x + dx, h + 3, z + dz, LEAF);
+      }
+      set(grid, x, h + 4, z, LEAF);
+    }
+  }
+}
+
+export function fillChunk(grid: Uint8Array, cx: number, cz: number, seed: number) {
+  const x0 = cx * CHUNK;
+  const z0 = cz * CHUNK;
+  for (let z = z0; z < z0 + CHUNK && z < SZ; z++) {
+    for (let x = x0; x < x0 + CHUNK && x < SX; x++) fillColumn(grid, x, z, seed);
+  }
+  const pocket = noise2((x0 + 8) * 0.22, (z0 + 8) * 0.22, seed + 5);
+  if (pocket > 0.72) {
+    for (let z = z0 + 2; z < z0 + CHUNK - 2 && z < SZ - 1; z++) {
+      for (let x = x0 + 2; x < x0 + CHUNK - 2 && x < SX - 1; x++) {
+        if (noise2(x * 0.22, z * 0.22, seed + 5) < 0.66) continue;
+        const inFort = x >= ROOM.x0 - 2 && x <= ROOM.x1 + 2 && z >= ROOM.z0 - 18 && z <= ROOM.z1 + 2;
+        if (inFort) continue;
+        for (let y = 2; y <= 4; y++) {
+          if (grid[idx(x, y, z)] === GEM) continue;
+          grid[idx(x, y, z)] = y === 2 && pocket > 0.84 ? WATER : AIR;
+        }
+      }
+    }
+  }
+}
+
+export function ensureChunks(grid: Uint8Array, ready: Uint8Array, seed: number, x: number, z: number, rad: number) {
+  const ccx = Math.floor(x / CHUNK);
+  const ccz = Math.floor(z / CHUNK);
+  const born: number[] = [];
+  for (let dz = -rad; dz <= rad; dz++) {
+    for (let dx = -rad; dx <= rad; dx++) {
+      const cx = ccx + dx;
+      const cz = ccz + dz;
+      if (cx < 0 || cz < 0 || cx >= CHUNKS_X || cz >= CHUNKS_Z) continue;
+      const i = chunkIndex(cx, cz);
+      if (ready[i]) continue;
+      fillChunk(grid, cx, cz, seed);
+      ready[i] = 1;
+      born.push(i);
+    }
+  }
+  return born;
+}
+
+export function markChunks(dirty: Set<number>, x: number, z: number) {
+  const cx = Math.floor(x / CHUNK);
+  const cz = Math.floor(z / CHUNK);
+  for (let dz = -1; dz <= 1; dz++) {
+    for (let dx = -1; dx <= 1; dx++) {
+      const x2 = cx + dx;
+      const z2 = cz + dz;
+      if (x2 < 0 || z2 < 0 || x2 >= CHUNKS_X || z2 >= CHUNKS_Z) continue;
+      dirty.add(chunkIndex(x2, z2));
+    }
+  }
+}
+
 function carveRoom(grid: Uint8Array) {
   for (let z = ROOM.z0; z <= ROOM.z1; z++) {
     for (let x = ROOM.x0; x <= ROOM.x1; x++) {
@@ -137,20 +234,21 @@ function carveRoom(grid: Uint8Array) {
 }
 
 function carveStairs(grid: Uint8Array): [number, number, number] {
-  let gate: [number, number, number] = [20, WALK, 14];
+  const xMid = ROOM.x0 + 5;
+  let gate: [number, number, number] = [xMid, WALK, ROOM.z0];
   for (let i = 0; i <= 14; i++) {
     const z = ROOM.z0 - i;
     const floorY = WALK - 1 - Math.floor(i / 2);
     const walk = floorY + 1;
-    for (let x = 18; x <= 21; x++) {
+    for (let x = xMid - 2; x <= xMid + 1; x++) {
       set(grid, x, floorY, z, i > 10 ? DIRT : STONE);
       for (let y = walk; y <= walk + 2; y++) set(grid, x, y, z, AIR);
       if (yHeadroom(grid, x, walk, z)) set(grid, x, walk + 3, z, AIR);
     }
-    gate = [20, walk, z];
+    gate = [xMid, walk, z];
   }
   for (let z = gate[2] - 1; z >= gate[2] - 3; z--) {
-    for (let x = 17; x <= 22; x++) {
+    for (let x = xMid - 3; x <= xMid + 2; x++) {
       const top = surfaceY(grid, x, z);
       if (top > 0) {
         set(grid, x, top, z, GRASS);
@@ -175,63 +273,22 @@ function surfaceY(grid: Uint8Array, x: number, z: number) {
   return 0;
 }
 
-export function generate(seed: number): { grid: Uint8Array; anchors: Anchors } {
+export function generate(seed: number): { grid: Uint8Array; anchors: Anchors; ready: Uint8Array } {
   const grid = new Uint8Array(SX * SY * SZ);
-  for (let z = 0; z < SZ; z++) {
-    for (let x = 0; x < SX; x++) {
-      const n = noise2(x * 0.16, z * 0.16, seed) * 2 + noise2(x * 0.05, z * 0.05, seed + 3);
-      let h = 4 + Math.floor((z / (SZ - 1)) * 11 + (n - 1) * 2.4);
-      if (x >= ROOM.x0 - 1 && x <= ROOM.x1 + 1 && z >= ROOM.z0 - 1 && z <= ROOM.z1 + 2) {
-        h = Math.max(h, WALK + 6);
-      }
-      h = Math.max(3, Math.min(SY - 3, h));
-      for (let y = 0; y <= h; y++) {
-        let t = STONE;
-        if (y === 0) t = STONE;
-        else if (y === h && h >= 6) t = GRASS;
-        else if (y >= h - 2 && h >= 6) t = DIRT;
-        else t = STONE;
-        if (t === STONE && y > 1 && y < h - 3 && hash(x, y + z * 17, seed + 11) > 0.8) t = ORE;
-        if (t === STONE && y > 1 && y < 6 && hash(x + 40, y + z * 9, seed + 19) > 0.93) t = GEM;
-        grid[idx(x, y, z)] = t;
-      }
-      if (hash(x, z, seed + 7) > 0.86 && h >= 7 && h < SY - 4) {
-        const overFort =
-          x >= ROOM.x0 - 1 && x <= ROOM.x1 + 1 && z >= ROOM.z0 - 6 && z <= ROOM.z1 + 1;
-        if (!overFort) {
-          set(grid, x, h + 1, z, LOG);
-          set(grid, x, h + 2, z, LOG);
-          for (let dz = -1; dz <= 1; dz++) {
-            for (let dx = -1; dx <= 1; dx++) set(grid, x + dx, h + 3, z + dz, LEAF);
-          }
-          set(grid, x, h + 4, z, LEAF);
-        }
-      }
-    }
-  }
+  const ready = new Uint8Array(CHUNKS_X * CHUNKS_Z);
+  const hx = ROOM.x0 + 5;
+  const hz = ROOM.z0 + 4;
+  ensureChunks(grid, ready, seed, hx, hz, 2);
 
-  for (let z = 1; z < SZ - 1; z++) {
-    for (let x = 1; x < SX - 1; x++) {
-      const pocket = noise2(x * 0.22, z * 0.22, seed + 5);
-      if (pocket < 0.62) continue;
-      if (x >= ROOM.x0 - 2 && x <= ROOM.x1 + 2 && z >= ROOM.z0 - 16 && z <= ROOM.z1 + 2) continue;
-      for (let y = 2; y <= 4; y++) {
-        const t = y === 2 && pocket > 0.78 ? WATER : AIR;
-        if (grid[idx(x, y, z)] !== GEM) grid[idx(x, y, z)] = t;
-      }
-    }
-  }
-
-  // A single magma pocket, deep and obvious if you dig down.
-  const mx = 8 + (seed % 6);
-  const mz = 8 + ((seed >> 3) % 5);
+  const mx = ROOM.x0 - 8 + (seed % 4);
+  const mz = ROOM.z0 - 6 + ((seed >> 3) % 4);
   for (let dz = 0; dz < 2; dz++) for (let dx = 0; dx < 2; dx++) set(grid, mx + dx, 1, mz + dz, MAGMA);
 
   carveRoom(grid);
 
-  // Service tunnel already open, a face of stone and ore just beyond it.
+  const tz = ROOM.z0 + 3;
   for (let x = ROOM.x1 + 1; x <= ROOM.x1 + 4; x++) {
-    for (let z = 25; z <= 27; z++) {
+    for (let z = tz; z <= tz + 2; z++) {
       set(grid, x, WALK - 1, z, STONE);
       set(grid, x, WALK, z, AIR);
       set(grid, x, WALK + 1, z, AIR);
@@ -239,9 +296,9 @@ export function generate(seed: number): { grid: Uint8Array; anchors: Anchors } {
     }
   }
   for (let x = ROOM.x1 + 5; x <= ROOM.x1 + 8; x++) {
-    for (let z = 25; z <= 27; z++) {
+    for (let z = tz; z <= tz + 2; z++) {
       set(grid, x, WALK - 1, z, STONE);
-      const ore = x >= ROOM.x1 + 7 && z === 26;
+      const ore = x >= ROOM.x1 + 7 && z === tz + 1;
       set(grid, x, WALK, z, ore ? ORE : STONE);
       set(grid, x, WALK + 1, z, STONE);
     }
@@ -249,11 +306,10 @@ export function generate(seed: number): { grid: Uint8Array; anchors: Anchors } {
 
   const gate = carveStairs(grid);
 
-  // Side grass shelves near the gate so farms read immediately.
   const farms: [number, number, number][] = [];
   const gz = gate[2];
   const gy = gate[1] - 1;
-  for (const fx of [16, 17, 23, 24]) {
+  for (const fx of [ROOM.x0 + 1, ROOM.x0 + 2, ROOM.x1 - 1, ROOM.x1]) {
     if (gy >= 1 && gy < SY) {
       set(grid, fx, gy, gz, GRASS);
       for (let y = gy + 1; y <= gy + 3; y++) set(grid, fx, y, gz, AIR);
@@ -264,28 +320,29 @@ export function generate(seed: number): { grid: Uint8Array; anchors: Anchors } {
     }
   }
 
-  set(grid, 16, WALK, 24, BED);
-  set(grid, 17, WALK, 24, BED);
-  set(grid, 18, WALK, 24, BED);
-  set(grid, 24, WALK, 29, STILL);
-  set(grid, 16, WALK, 27, TORCH);
-  set(grid, 24, WALK, 23, TORCH);
-  set(grid, 20, WALK, 30, TORCH);
-  set(grid, ROOM.x1 + 4, WALK, 26, TORCH);
+  set(grid, ROOM.x0 + 1, WALK, ROOM.z0 + 2, BED);
+  set(grid, ROOM.x0 + 2, WALK, ROOM.z0 + 2, BED);
+  set(grid, ROOM.x0 + 3, WALK, ROOM.z0 + 2, BED);
+  set(grid, ROOM.x1 - 1, WALK, ROOM.z1 - 1, STILL);
+  set(grid, ROOM.x0 + 1, WALK, ROOM.z0 + 5, TORCH);
+  set(grid, ROOM.x1 - 1, WALK, ROOM.z0 + 1, TORCH);
+  set(grid, hx, WALK, ROOM.z1, TORCH);
+  set(grid, ROOM.x1 + 4, WALK, tz + 1, TORCH);
+  set(grid, hx - 2, WALK, ROOM.z0 + 1, CHEST);
 
   const stocks: [number, number, number][] = [];
-  for (let z = 22; z <= 23; z++) {
-    for (let x = 20; x <= 22; x++) stocks.push([x, WALK, z]);
+  for (let z = ROOM.z0; z <= ROOM.z0 + 1; z++) {
+    for (let x = hx; x <= hx + 2; x++) stocks.push([x, WALK, z]);
   }
 
   const anchors: Anchors = {
     gate,
-    hall: [20, WALK, 26],
-    deep: [ROOM.x1 + 4, WALK, 26],
+    hall: [hx, WALK, hz],
+    deep: [ROOM.x1 + 4, WALK, tz + 1],
     farms,
     stocks,
   };
-  return { grid, anchors };
+  return { grid, anchors, ready };
 }
 
 export type LightMaps = { sky: Uint8Array; torch: Uint8Array };
@@ -392,6 +449,9 @@ export function buildMeshes(
   light: LightMaps,
   growth: Map<number, number>,
   layer: number | null,
+  box?: { x0: number; x1: number; z0: number; z1: number },
+  ready?: Uint8Array,
+  clipZ = 0,
 ): BuiltMeshes {
   const sp: number[] = [];
   const sc: number[] = [];
@@ -409,10 +469,16 @@ export function buildMeshes(
     return { s: light.sky[idx(x, y, z)] / 15, t: light.torch[idx(x, y, z)] / 15, block: grid[idx(x, y, z)] };
   };
 
-  for (let z = 0; z < SZ; z++) {
+  const x0 = box?.x0 ?? 0;
+  const x1 = box?.x1 ?? SX - 1;
+  const z0 = box?.z0 ?? 0;
+  const z1 = box?.z1 ?? SZ - 1;
+
+  for (let z = z0; z <= z1; z++) {
     for (let y = 0; y < SY; y++) {
       if (layer !== null && (y > layer || y < layer - 1)) continue;
-      for (let x = 0; x < SX; x++) {
+      for (let x = x0; x <= x1; x++) {
+        if (clipZ > 0 && z < clipZ) continue;
         const t = grid[idx(x, y, z)];
         if (!isCube(t)) continue;
         const water = t === WATER;
@@ -427,7 +493,9 @@ export function buildMeshes(
           const nz = z + face.d[2];
           let nt = AIR;
           if (inb(nx, ny, nz)) {
-            if (layer !== null && ny > layer) nt = AIR;
+            if (clipZ > 0 && nz < clipZ) nt = AIR;
+            else if (ready && !ready[chunkIndex(Math.floor(nx / CHUNK), Math.floor(nz / CHUNK))]) nt = STONE;
+            else if (layer !== null && ny > layer) nt = AIR;
             else if (layer !== null && ny < layer - 1) nt = STONE;
             else nt = grid[idx(nx, ny, nz)];
           }
@@ -643,7 +711,7 @@ export function raycast(
   let ny = 0;
   let nz = 0;
   let t = 0;
-  for (let i = 0; i < 96; i++) {
+  for (let i = 0; i < 220; i++) {
     const clipped = clipZ > 0 && z < clipZ;
     const onLayer = layer === null || y === layer || y === layer - 1;
     if (inb(x, y, z) && isCube(grid[idx(x, y, z)]) && !clipped && onLayer && (i > 0 || t > 0 || true)) {

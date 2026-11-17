@@ -50,6 +50,15 @@
     linear-gradient(180deg, var(--color-surface-2), var(--color-surface));
 }
 
+@media (pointer: coarse) {
+  .camera-dock {
+    display: none;
+  }
+  .tool-label {
+    display: none;
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   .pulse-ember {
     animation: none !important;

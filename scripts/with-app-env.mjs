@@ -111,9 +111,13 @@ function main(argv) {
     process.exit(2);
   }
   const env = mergeAppEnv(readAppEnv(projectRoot()), process.env);
-  // Windows ships the Vite bin as vite.cmd. spawn() without a shell does not
-  // apply PATHEXT, so `npm run dev` dies with ENOENT. cmd resolves it.
-  const child = spawn(command, args, {
+  // Node's spawn does not resolve npm's Windows .cmd shims when shell=false.
+  // npm exposes `vite` through node_modules/.bin, so make that shim explicit
+  // while preserving the direct executable path used on POSIX systems.
+  const executable = process.platform === "win32" && !command.endsWith(".cmd") ? `${command}.cmd` : command;
+  // Windows command shims (`*.cmd`) must be launched through the shell.
+  // Without this, Node reports `spawn EINVAL` before Vite can start.
+  const child = spawn(executable, args, {
     stdio: "inherit",
     env,
     shell: process.platform === "win32",

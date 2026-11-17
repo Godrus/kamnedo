@@ -2,6 +2,7 @@ import type { Mat, Role, Tool } from "./constants";
 import {
   AIR,
   BED,
+  CHEST,
   DIRT,
   FARM,
   GEM,
@@ -18,6 +19,8 @@ import {
   WALK,
   WALL,
   diggable,
+  emptyMats,
+  GAME_HOURS_PER_REAL_SECOND,
   goodStand,
   idx,
   inb,
@@ -26,7 +29,7 @@ import {
   solidFloor,
   unidx,
 } from "./constants";
-import { findPath, generate, workSpot, type Anchors } from "./world";
+import { findPath, generate, markChunks, workSpot, type Anchors } from "./world";
 
 export type Task =
   | { kind: "dig"; x: number; y: number; z: number; work: number; phase: "go" | "work" }
@@ -89,10 +92,12 @@ export type GameState = {
   seed: number;
   name: string;
   grid: Uint8Array;
+  ready: Uint8Array;
   anchors: Anchors;
   digs: Map<number, { claim: number }>;
   builds: Map<number, { claim: number; what: "wall" | "bed" | "still" }>;
   stocksCells: Set<number>;
+  chests: Map<number, Record<Mat, number>>;
   growth: Map<number, number>;
   piles: Pile[];
   stocks: Record<Mat, number>;
@@ -118,6 +123,7 @@ export type GameState = {
   mined: number;
   oreStruck: boolean;
   dirty: boolean;
+  dirtyChunks: Set<number>;
   propsDirty: boolean;
   events: { s: "dig" | "build" | "alert" | "good" | "hit" | "death"; x?: number; y?: number; z?: number; rgb?: number }[];
   hourMark: number;
@@ -151,16 +157,19 @@ function banner(s: GameState, text: string) {
 }
 
 export function createGame(name: string, seed: number): GameState {
-  const { grid, anchors } = generate(seed);
+  const { grid, anchors, ready } = generate(seed);
   const rng = mulberry(seed);
+  const [hx, hy, hz] = anchors.hall;
   const s: GameState = {
     seed,
     name: name.trim().slice(0, 28) || "Горн-на-Жиле",
     grid,
+    ready,
     anchors,
     digs: new Map(),
     builds: new Map(),
     stocksCells: new Set(anchors.stocks.map(([x, y, z]) => idx(x, y, z))),
+    chests: new Map(),
     growth: new Map(),
     piles: [],
     stocks: { stone: 18, ore: 0, gem: 0, wood: 16, food: 42, drink: 34 },
@@ -186,31 +195,35 @@ export function createGame(name: string, seed: number): GameState {
     mined: 0,
     oreStruck: false,
     dirty: true,
+    dirtyChunks: new Set(),
     propsDirty: true,
     events: [],
     hourMark: 8,
     tutorialSeen: false,
   };
+  for (let i = 0; i < grid.length; i++) {
+    if (grid[i] === CHEST) s.chests.set(i, { ...emptyMats(), food: 4, drink: 2 });
+  }
   for (const [x, y, z] of anchors.farms) s.growth.set(idx(x, y, z), 55);
   const roles: Role[] = ["miner", "mason", "farmer", "brewer", "hauler", "guard"];
   roles.forEach((role, i) => {
     const female = i === 2 || i === 3;
     const first = female ? FIRST_F[i % FIRST_F.length] : FIRST_M[i % FIRST_M.length];
     const d = makeDwarf(s, `${first} ${LAST[i % LAST.length]}`, female, role, COLORS[i % COLORS.length]);
-    d.x = 18 + (i % 3) + 0.5;
-    d.y = WALK;
-    d.z = 26 + Math.floor(i / 3) + (i % 2) * 0.15;
+    d.x = hx + (i % 3) * 0.9 + 0.4;
+    d.y = hy;
+    d.z = hz + Math.floor(i / 3) * 0.9;
     d.hunger = 12 + rng() * 28;
     d.thirst = 10 + rng() * 24;
     d.sleep = 8 + rng() * 20;
     s.dwarves.push(d);
   });
-  // The first face of the tunnel is already marked, so a pick starts singing.
+  const tz = ROOM.z0 + 3;
   for (let x = ROOM.x1 + 5; x <= ROOM.x1 + 6; x++) {
-    for (let z = 25; z <= 27; z++) s.digs.set(idx(x, WALK, z), { claim: 0 });
+    for (let z = tz; z <= tz + 2; z++) s.digs.set(idx(x, WALK, z), { claim: 0 });
   }
-  s.digs.set(idx(ROOM.x1 + 7, WALK, 26), { claim: 0 });
-  pushLog(s, "Телега у ворот. В бочках еда и пиво — гора уже помечена киркой.", "info");
+  s.digs.set(idx(ROOM.x1 + 7, WALK, tz + 1), { claim: 0 });
+  pushLog(s, "Телега у ворот. В зале стоит сундук — коснитесь его, чтобы открыть.", "info");
   return s;
 }
 
@@ -369,6 +382,7 @@ function finishDig(s: GameState, x: number, y: number, z: number) {
     s.events.push({ s: "good" });
   }
   s.events.push({ s: "dig", x, y, z, rgb: t === ORE ? 0xc47a3a : t === GEM ? 0x3cafa6 : 0x8b8176 });
+  markChunks(s.dirtyChunks, x, z);
   s.dirty = true;
   s.propsDirty = true;
   s.fail.clear();
@@ -400,6 +414,7 @@ function finishBuild(s: GameState, x: number, y: number, z: number, what: "wall"
   s.grid[i] = what === "wall" ? WALL : what === "bed" ? BED : STILL;
   s.builds.delete(i);
   s.events.push({ s: "build", x, y, z });
+  markChunks(s.dirtyChunks, x, z);
   s.dirty = true;
   s.propsDirty = true;
   pushLog(s, what === "wall" ? "Стена села на место." : what === "bed" ? "Кровать готова. Кто-то уже зевает." : "Пивоварня пахнет суслом.", "good");
@@ -849,6 +864,7 @@ function tickDwarf(s: GameState, d: Dwarf, dt: number) {
       const i = idx(task.x, task.y, task.z);
       s.growth.set(i, 0);
       addPile(s, task.x, task.y + 1, task.z, "food", 2);
+      markChunks(s.dirtyChunks, task.x, task.z);
       s.dirty = true;
       s.events.push({ s: "good" });
     }
@@ -928,7 +944,7 @@ function tickEnemy(s: GameState, e: Enemy, dt: number) {
 export function step(s: GameState, dt: number) {
   if (s.fallen) return;
   s.time += dt;
-  s.hour += dt;
+  s.hour += dt * GAME_HOURS_PER_REAL_SECOND;
   if (s.bannerT > 0) s.bannerT -= dt;
   if (s.bannerT <= 0) s.banner = "";
   const winter = seasonOf(s.day) === "зима";
@@ -978,7 +994,7 @@ export function paint(s: GameState, tool: Tool, x: number, y: number, z: number,
     if (!diggable(s.grid[idx(x, y, z)])) return "Здесь нечего копать";
     const i = idx(x, y, z);
     if (s.digs.has(i)) return null;
-    if (s.digs.size > 420) return "Слишком много меток";
+    if (s.digs.size > 1600) return "Слишком много меток";
     s.digs.set(i, { claim: 0 });
     s.fail.delete(i);
     return null;
@@ -988,6 +1004,7 @@ export function paint(s: GameState, tool: Tool, x: number, y: number, z: number,
     if (t !== GRASS && t !== DIRT && t !== FARM) return "Ферма садится только на землю";
     s.grid[idx(x, y, z)] = FARM;
     s.growth.set(idx(x, y, z), s.growth.get(idx(x, y, z)) ?? 0);
+    markChunks(s.dirtyChunks, x, z);
     s.dirty = true;
     s.events.push({ s: "build", x, y, z });
     return null;
@@ -1002,12 +1019,17 @@ export function paint(s: GameState, tool: Tool, x: number, y: number, z: number,
     s.propsDirty = true;
     return null;
   }
-  if (tool === "torch") {
+  if (tool === "torch" || tool === "chest") {
     const cell = airCell(s, x, y, z, nx, ny, nz);
-    if (!cell) return "Факел ставят на пол";
-    if (s.stocks.wood < 1) return "Мало дерева";
-    s.stocks.wood--;
-    s.grid[idx(cell[0], cell[1], cell[2])] = TORCH;
+    if (!cell) return tool === "chest" ? "Сундук ставят на пол" : "Факел ставят на пол";
+    const wood = tool === "chest" ? 2 : 1;
+    if (s.stocks.wood < wood) return "Мало дерева";
+    s.stocks.wood -= wood;
+    const [cx, cy, cz] = cell;
+    const i = idx(cx, cy, cz);
+    s.grid[i] = tool === "chest" ? CHEST : TORCH;
+    if (tool === "chest") s.chests.set(i, emptyMats());
+    markChunks(s.dirtyChunks, cx, cz);
     s.dirty = true;
     s.propsDirty = true;
     s.events.push({ s: "build" });
@@ -1040,11 +1062,13 @@ export function paint(s: GameState, tool: Tool, x: number, y: number, z: number,
         if (s.stocksCells.delete(above)) hit = true;
       }
       const bt = s.grid[pi];
-      if (bt === WALL || bt === BED || bt === STILL || bt === TORCH || bt === FARM) {
+      if (bt === WALL || bt === BED || bt === STILL || bt === TORCH || bt === FARM || bt === CHEST) {
         if (bt === WALL) addPile(s, placeX, placeY, placeZ, "stone", 1);
         if (bt === BED || bt === TORCH) addPile(s, placeX, placeY, placeZ, "wood", 1);
         if (bt === STILL) addPile(s, placeX, placeY, placeZ, "wood", 1);
+        if (bt === CHEST) spillChest(s, pi);
         s.grid[pi] = AIR;
+        markChunks(s.dirtyChunks, placeX, placeZ);
         s.dirty = true;
         s.propsDirty = true;
         hit = true;
@@ -1053,21 +1077,118 @@ export function paint(s: GameState, tool: Tool, x: number, y: number, z: number,
     if (s.grid[solidI] === FARM) {
       s.grid[solidI] = DIRT;
       s.growth.delete(solidI);
+      markChunks(s.dirtyChunks, x, z);
       s.dirty = true;
       hit = true;
     }
-    if (s.grid[solidI] === WALL || s.grid[solidI] === BED || s.grid[solidI] === STILL || s.grid[solidI] === TORCH) {
+    if (s.grid[solidI] === WALL || s.grid[solidI] === BED || s.grid[solidI] === STILL || s.grid[solidI] === TORCH || s.grid[solidI] === CHEST) {
       const bt = s.grid[solidI];
       if (bt === WALL) addPile(s, x, y, z, "stone", 1);
       if (bt === BED || bt === TORCH) addPile(s, x, y, z, "wood", 1);
       if (bt === STILL) addPile(s, x, y, z, "wood", 1);
+      if (bt === CHEST) spillChest(s, solidI);
       s.grid[solidI] = AIR;
+      markChunks(s.dirtyChunks, x, z);
       s.dirty = true;
       s.propsDirty = true;
       hit = true;
     }
     return hit ? null : null;
   }
+  return null;
+}
+
+function spillChest(s: GameState, i: number) {
+  const box = s.chests.get(i);
+  s.chests.delete(i);
+  if (!box) return;
+  const { x, y, z } = unidx(i);
+  (Object.keys(box) as Mat[]).forEach((mat) => {
+    if (box[mat] > 0) addPile(s, x, y, z, mat, box[mat]);
+  });
+}
+
+export function brushCells(
+  a: { x: number; y: number; z: number },
+  b: { x: number; y: number; z: number },
+  nx: number,
+  ny: number,
+  nz: number,
+) {
+  // Selection is a plane, never an accidental cuboid. The face normal tells
+  // us which axis is depth; this makes underground edits predictable.
+  const clampSpan = (lo: number, hi: number, max: number) => {
+    const size = hi - lo + 1;
+    return size <= max ? [lo, hi] : [lo, lo + max - 1];
+  };
+  let x0 = Math.min(a.x, b.x), x1 = Math.max(a.x, b.x);
+  let y0 = Math.min(a.y, b.y), y1 = Math.max(a.y, b.y);
+  let z0 = Math.min(a.z, b.z), z1 = Math.max(a.z, b.z);
+  if (Math.abs(ny) >= Math.abs(nx) && Math.abs(ny) >= Math.abs(nz)) {
+    y0 = y1 = a.y;
+    [x0, x1] = clampSpan(x0, x1, 18);
+    [z0, z1] = clampSpan(z0, z1, 18);
+  } else if (Math.abs(nx) >= Math.abs(nz)) {
+    x0 = x1 = a.x;
+    [y0, y1] = clampSpan(y0, y1, 8);
+    [z0, z1] = clampSpan(z0, z1, 18);
+  } else {
+    z0 = z1 = a.z;
+    [x0, x1] = clampSpan(x0, x1, 18);
+    [y0, y1] = clampSpan(y0, y1, 8);
+  }
+  const out: { x: number; y: number; z: number }[] = [];
+  for (let y = y0; y <= y1; y++) {
+    for (let z = z0; z <= z1; z++) {
+      for (let x = x0; x <= x1; x++) out.push({ x, y, z });
+    }
+  }
+  return out;
+}
+
+export function paintBox(
+  s: GameState,
+  tool: Tool,
+  a: { x: number; y: number; z: number },
+  b: { x: number; y: number; z: number },
+  nx: number,
+  ny: number,
+  nz: number,
+) {
+  const cells = brushCells(a, b, nx, ny, nz);
+  let msg: string | null = null;
+  let placed = 0;
+  for (const c of cells) {
+    const before = s.grid[idx(c.x, c.y, c.z)];
+    const digs = s.digs.size;
+    const builds = s.builds.size;
+    const m = paint(s, tool, c.x, c.y, c.z, nx, ny, nz);
+    if (m && !msg) msg = m;
+    if (s.grid[idx(c.x, c.y, c.z)] !== before || s.digs.size !== digs || s.builds.size !== builds) placed++;
+  }
+  if (placed > 1 && tool === "dig") return `Помечено блоков: ${placed}`;
+  if (placed > 1 && (tool === "cancel" || tool === "wall" || tool === "farm" || tool === "chest")) {
+    return msg ?? `Область: ${placed}`;
+  }
+  return placed === 0 ? msg : null;
+}
+
+export function moveChest(s: GameState, cell: number, mat: Mat, dir: "in" | "out", n: number) {
+  const box = s.chests.get(cell);
+  if (!box) return "Сундука здесь нет";
+  const qty = Math.max(1, Math.floor(n));
+  if (dir === "in") {
+    const take = Math.min(qty, s.stocks[mat]);
+    if (take <= 0) return "На складе этого нет";
+    s.stocks[mat] -= take;
+    box[mat] += take;
+  } else {
+    const take = Math.min(qty, box[mat]);
+    if (take <= 0) return "В сундуке этого нет";
+    box[mat] -= take;
+    s.stocks[mat] += take;
+  }
+  s.propsDirty = true;
   return null;
 }
 

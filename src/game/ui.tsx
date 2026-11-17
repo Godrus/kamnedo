@@ -2,13 +2,20 @@ import { useSyncExternalStore, type ReactNode } from "react";
 import {
   BedDouble,
   Beer,
+  Box,
   BrickWall,
+  ChevronDown,
+  ChevronLeft,
+  ChevronRight,
+  ChevronUp,
   Eye,
   Flame,
   Layers,
+  Minus,
   Pause,
   Pickaxe,
   Play,
+  Plus,
   RotateCcw,
   RotateCw,
   ScrollText,
@@ -19,7 +26,7 @@ import {
   ZoomIn,
   ZoomOut,
 } from "lucide-react";
-import { ROLE_LABEL, type Role, type Tool } from "./constants";
+import { MAT_LABEL, ROLE_LABEL, TOOLS, type Mat, type Role, type Tool } from "./constants";
 import type { Engine, HudSnap } from "./engine";
 
 const ICONS: Record<Tool, typeof Eye> = {
@@ -30,6 +37,7 @@ const ICONS: Record<Tool, typeof Eye> = {
   farm: Wheat,
   still: Beer,
   stock: Warehouse,
+  chest: Box,
   torch: Flame,
   cancel: X,
 };
@@ -100,7 +108,19 @@ export function Overlay({ engine }: { engine: Engine }) {
       </div>
 
       <div className="relative min-h-0 flex-1">
-        <div className="pointer-events-auto absolute bottom-3 left-3 flex flex-col gap-1">
+        <div className="camera-dock pointer-events-auto absolute bottom-3 left-3 flex flex-col gap-1">
+          <CamBtn label="Сдвинуть влево" onClick={() => engine.panStep(-1, 0)}>
+            <ChevronLeft className="size-5" />
+          </CamBtn>
+          <CamBtn label="Сдвинуть вправо" onClick={() => engine.panStep(1, 0)}>
+            <ChevronRight className="size-5" />
+          </CamBtn>
+          <CamBtn label="Сдвинуть вперёд" onClick={() => engine.panStep(0, 1)}>
+            <ChevronUp className="size-5" />
+          </CamBtn>
+          <CamBtn label="Сдвинуть назад" onClick={() => engine.panStep(0, -1)}>
+            <ChevronDown className="size-5" />
+          </CamBtn>
           <CamBtn label="Повернуть влево" onClick={() => engine.nudgeYaw(1)}>
             <RotateCcw className="size-5" />
           </CamBtn>
@@ -128,12 +148,23 @@ export function Overlay({ engine }: { engine: Engine }) {
             <input
               type="range"
               min={s.view === "volume" ? 0 : 1}
-              max={s.view === "volume" ? 39 : s.maxLayer}
+              max={s.view === "volume" ? s.maxClip : s.maxLayer}
               value={s.view === "volume" ? s.clip : s.layer}
               onChange={(e) => engine.setSlider(Number(e.target.value))}
               className="w-full accent-ember"
             />
           </label>
+          {s.view === "layer" ? (
+            <div className="flex items-center justify-between gap-1 rounded-lg border border-line bg-surface/95 p-1">
+              <button type="button" aria-label="Предыдущий подземный слой" onClick={() => engine.nudgeLayer(-1)} className="flex h-10 w-10 items-center justify-center rounded-md border border-line">
+                <Minus className="size-4" />
+              </button>
+              <span className="text-xs text-muted">Y = {s.layer}</span>
+              <button type="button" aria-label="Следующий подземный слой" onClick={() => engine.nudgeLayer(1)} className="flex h-10 w-10 items-center justify-center rounded-md border border-line">
+                <Plus className="size-4" />
+              </button>
+            </div>
+          ) : null}
         </div>
         {s.banner ? (
           <div
@@ -152,7 +183,8 @@ export function Overlay({ engine }: { engine: Engine }) {
       {s.fallen ? <Fallen s={s} engine={engine} /> : null}
       {s.showRoster ? <Roster s={s} engine={engine} /> : null}
       {s.showLog ? <LogPanel s={s} engine={engine} /> : null}
-      {s.selected && !s.showRoster ? <DwarfSheet s={s} engine={engine} /> : null}
+      {s.selected && !s.showRoster && !s.inspect ? <DwarfSheet s={s} engine={engine} /> : null}
+      {s.inspect && !s.showRoster ? <InspectSheet s={s} engine={engine} /> : null}
 
       <div className="pointer-events-none px-3 pb-1 text-xs text-muted">
         <p className="truncate">{s.speed === 0 ? "Пауза. " : ""}{s.ticker}</p>
@@ -165,28 +197,9 @@ export function Overlay({ engine }: { engine: Engine }) {
         <SideBtn label="Хроника" on={s.showLog} onClick={engine.toggleLog}>
           <ScrollText className="size-5" />
         </SideBtn>
-        {s.roster.length >= 0
-          ? (Object.keys(ICONS) as Tool[]).map((id) => {
+        {TOOLS.map(({ id, label }) => {
               const Icon = ICONS[id];
               const on = s.tool === id;
-              const label =
-                id === "look"
-                  ? "Обзор"
-                  : id === "dig"
-                    ? "Копать"
-                    : id === "wall"
-                      ? "Стена"
-                      : id === "bed"
-                        ? "Кровать"
-                        : id === "farm"
-                          ? "Ферма"
-                          : id === "still"
-                            ? "Брага"
-                            : id === "stock"
-                              ? "Склад"
-                              : id === "torch"
-                                ? "Огонь"
-                                : "Снять";
               return (
                 <button
                   key={id}
@@ -194,16 +207,15 @@ export function Overlay({ engine }: { engine: Engine }) {
                   onClick={() => engine.setTool(id)}
                   className={
                     on
-                      ? "flex h-14 w-16 shrink-0 flex-col items-center justify-center gap-0.5 rounded-lg bg-ember text-ember-ink"
-                      : "flex h-14 w-16 shrink-0 flex-col items-center justify-center gap-0.5 rounded-lg border border-line bg-surface text-fg"
+                      ? "flex h-12 w-14 shrink-0 flex-col items-center justify-center gap-0.5 rounded-lg bg-ember text-ember-ink"
+                      : "flex h-12 w-14 shrink-0 flex-col items-center justify-center gap-0.5 rounded-lg border border-line bg-surface text-fg"
                   }
                 >
                   <Icon className="size-5" />
-                  <span className="text-xs leading-none">{label}</span>
+                  <span className="tool-label text-xs leading-none">{label}</span>
                 </button>
               );
-            })
-          : null}
+            })}
       </div>
     </div>
   );
@@ -271,12 +283,50 @@ function Coach({ engine }: { engine: Engine }) {
     <div className="pointer-events-auto absolute top-3 right-3 left-16 max-w-sm rounded-lg border border-line bg-surface/95 p-3">
       <p className="font-display text-base leading-tight">Кирка уже звенит</p>
       <p className="mt-1 text-sm text-muted">
-        Сначала осмотритесь: палец или мышь крутят гору. Потом «Копать» и ведите по камню. Щипок двумя пальцами приближает.
+        Один палец крутит гору за собой, без переворота осей. Два пальца сдвигают карту и приближают — земля остаётся под пальцами. Правая кнопка мыши тоже сдвигает.
       </p>
       <button type="button" onClick={engine.dismissTutorial} className="mt-2 text-sm text-ember">
         Понятно
       </button>
     </div>
+  );
+}
+
+function InspectSheet({ s, engine }: { s: HudSnap; engine: Engine }) {
+  const box = s.inspect;
+  if (!box) return null;
+  return (
+    <section className="pointer-events-auto mx-2 mb-2 max-h-64 overflow-y-auto rounded-lg border border-line bg-surface/95 p-3">
+      <div className="flex items-start justify-between gap-2">
+        <div>
+          <h2 className="font-display text-lg leading-tight">{box.title}</h2>
+          <p className="text-sm text-muted">{box.body}</p>
+        </div>
+        <button type="button" aria-label="Закрыть" onClick={engine.closeInspect} className="text-muted">
+          <X className="size-5" />
+        </button>
+      </div>
+      {box.chest ? (
+        <ul className="mt-2 flex flex-col gap-1">
+          {box.slots.map((slot) => (
+            <li key={slot.mat} className="flex items-center gap-1">
+              <span className="w-24 text-sm text-fg">{MAT_LABEL[slot.mat as Mat]}</span>
+              <span className="w-16 text-xs text-muted">сундук {slot.n}</span>
+              <button type="button" onClick={() => engine.shiftChest(slot.mat, "in", 1)} className="h-9 rounded-lg border border-line px-2 text-xs">
+                +1
+              </button>
+              <button type="button" onClick={() => engine.shiftChest(slot.mat, "out", 1)} className="h-9 rounded-lg border border-line px-2 text-xs">
+                −1
+              </button>
+              <button type="button" onClick={() => engine.shiftChest(slot.mat, "in", 5)} className="h-9 rounded-lg border border-line px-2 text-xs">
+                +5
+              </button>
+              <span className="text-xs text-muted">склад {slot.fort}</span>
+            </li>
+          ))}
+        </ul>
+      ) : null}
+    </section>
   );
 }
 

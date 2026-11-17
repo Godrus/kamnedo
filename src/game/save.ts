@@ -1,15 +1,17 @@
-import { SAVE_KEY } from "./constants";
+import { SAVE_KEY, SX, SY, SZ, type Mat } from "./constants";
 import type { GameState } from "./sim";
 
 type Blob = {
-  v: 1;
+  v: 2;
   seed: number;
   name: string;
   grid: string;
+  ready: number[];
   anchors: GameState["anchors"];
   digs: [number, { claim: number }][];
   builds: [number, { claim: number; what: "wall" | "bed" | "still" }][];
   stocksCells: number[];
+  chests: [number, Record<Mat, number>][];
   growth: [number, number][];
   piles: GameState["piles"];
   stocks: GameState["stocks"];
@@ -58,14 +60,16 @@ export function hasSave() {
 
 export function writeSave(s: GameState) {
   const blob: Blob = {
-    v: 1,
+    v: 2,
     seed: s.seed,
     name: s.name,
     grid: encode(s.grid),
+    ready: [...s.ready],
     anchors: s.anchors,
     digs: [...s.digs.entries()],
     builds: [...s.builds.entries()],
     stocksCells: [...s.stocksCells],
+    chests: [...s.chests.entries()],
     growth: [...s.growth.entries()],
     piles: s.piles,
     stocks: s.stocks,
@@ -99,16 +103,20 @@ export function readSave(): GameState | null {
     const raw = localStorage.getItem(SAVE_KEY);
     if (!raw) return null;
     const b = JSON.parse(raw) as Blob;
-    if (b.v !== 1 || !b.grid) return null;
+    if (b.v !== 2 || !b.grid) return null;
     const grid = decode(b.grid);
+    if (grid.length !== SX * SY * SZ) return null;
+    const ready = new Uint8Array(b.ready ?? []);
     const s = {
       seed: b.seed,
       name: b.name,
       grid,
+      ready,
       anchors: b.anchors,
       digs: new Map(b.digs),
       builds: new Map(b.builds),
       stocksCells: new Set(b.stocksCells),
+      chests: new Map(b.chests ?? []),
       growth: new Map(b.growth),
       piles: b.piles ?? [],
       stocks: b.stocks,
@@ -134,6 +142,7 @@ export function readSave(): GameState | null {
       mined: b.mined ?? 0,
       oreStruck: !!b.oreStruck,
       dirty: true,
+      dirtyChunks: new Set<number>(),
       propsDirty: true,
       events: [],
       hourMark: Math.floor(b.hour),

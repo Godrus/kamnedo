@@ -69,11 +69,11 @@ function Home() {
         <ul className="mt-8 flex flex-col gap-3 text-sm text-muted">
           <li className="flex gap-3">
             <Pickaxe className="mt-0.5 size-4 shrink-0 text-ember" />
-            Зажмите склон и ведите — так ставят копку. Склад уже размечен в зале.
+            Зажмите склон и протяните прямоугольник — так помечают копку. Снять убирает постройки в области.
           </li>
           <li className="flex gap-3">
             <Smartphone className="mt-0.5 size-4 shrink-0 text-ember" />
-            Два пальца крутят гору. На компьютере — мышь, WASD и клавиши 1–9.
+            Один палец крутит гору за пальцем. Два пальца сдвигают и приближают. Правая кнопка мыши и WASD — сдвиг карты.
           </li>
           <li className="flex gap-3">
             <TreePine className="mt-0.5 size-4 shrink-0 text-ember" />
